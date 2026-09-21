@@ -13,3 +13,5 @@ dist/
 data/customers.csv
 data/customers.xlsx
 data/*~
+
+.planning/
