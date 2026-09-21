@@ -1,0 +1,49 @@
+{
+  "portal_url": "https://portal-prod.npa.se/",
+  "code_wait_seconds": 90,
+  "target_user": {
+    "first_name": "Min",
+    "last_name": "Liu",
+    "email": "admin@example.com",
+    "permission": "Administrator"
+  },
+  "target_invoice_email": "invoice@example.com",
+  "mail_routes": [
+    {
+      "key": "aid",
+      "patterns": ["erp-aid.example.invalid"],
+      "tokens": ["aid"],
+      "url": "https://mail.erp-aid.example.invalid/mail/"
+    },
+    {
+      "key": "er-helper",
+      "patterns": ["example.invalid", "erp-helper.example.invalid"],
+      "tokens": ["er-helper"],
+      "url": "https://mail.erp-helper.example.invalid/mail/"
+    },
+    {
+      "key": "eu-erp.example.invalid",
+      "patterns": ["eu-erp.example.invalid"],
+      "tokens": ["eu-erp"],
+      "url": "https://mail.eu-erp.example.invalid/"
+    },
+    {
+      "key": "ecopv-info",
+      "patterns": ["ecopv-info.example.invalid"],
+      "tokens": ["ecopv-info"],
+      "url": "https://mail.ecopv-info.example.invalid/?_task=login&_err=session"
+    },
+    {
+      "key": "163",
+      "patterns": ["163.com"],
+      "tokens": ["163"],
+      "url": "https://mail.163.com/"
+    },
+    {
+      "key": "aliyun",
+      "patterns": ["ecopv0316.example.invalid", "mail2.example.invalid", "mail3.example.invalid"],
+      "tokens": ["ecopv0316", "1533333", "1733333"],
+      "url": "https://qiye.aliyun.com/alimail/auth/login?reurl=%2Falimail%2FinternalLinks%2FredirectToApp%3FappUrl%3D%252Fadmin%252Fauth%252FcallbackForWebmail%253Freurl%253D%25252Fadmin%25252F%252523%25252Fhome"
+    }
+  ]
+}

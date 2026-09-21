@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.playwright-ready
+gui_state.json
+runs/
+build_exe/
+build/
+dist/
+*.spec
+*.zip
+*.bak*
+data/customers.csv
+data/customers.xlsx
+data/*~
