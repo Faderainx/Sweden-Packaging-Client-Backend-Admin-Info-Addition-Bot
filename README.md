@@ -2,7 +2,7 @@
 
 这个工具按《瑞典包装服务商后台新增管理员 SOP》执行客户账号维护：登录 NPA 门户，读取邮箱验证码，检查并添加管理员，检查并修改 Invoice email。
 
-当前版本：`v2026.09.20`。验证码只走自动读取与提交流程，图形界面不再提供人工输入和“提交验证码”按钮。
+当前版本：`v2026.09.21`。验证码只走自动读取与提交流程，图形界面不再提供人工输入和“提交验证码”按钮。
 
 ## EXE 版使用方法
 
@@ -61,22 +61,27 @@ GUI 支持 `.xlsx` 和 `.csv`。推荐使用以下字段：
 
 - `logs\operator.log`：面向操作人员的简洁进度日志，包含当前客户、当前步骤和成功/失败/跳过统计。
 - `logs\events.jsonl`：详细事件日志，不记录密码和验证码。
-- `results\results.xlsx`：已经处理过的全部记录，运行过程中持续更新。
-- `failed\failed.xlsx`：状态不是 `completed` 的记录及失败步骤、失败原因，方便人工处理或单独重跑。
+- `results\results.xlsx`：本批全部输入记录，未处理的行会明确标为 `pending/未处理`；每完成一条就立即写入状态、管理员动作、Invoice email 动作、失败步骤、失败原因和更新时间。
+- `failed\failed.xlsx`：只包含 `failed` 或 `manual_required` 记录；每条都带有 `status_label`、`failed_step`、`failure_reason`、`retryable`，方便人工处理或单独重跑。管理员已存在的记录不会进入失败表。
 - `state\run_summary.json`：本次运行的实时汇总和最后处理位置。
 
-原始客户表格会同步写入 `status`、`admin_action`、`invoice_action`、`failed_step`、`error`、`updated_at`、`run_id` 这些结果列。程序不会另存原表备份；写入时只使用同目录临时文件完成替换，避免中途写入半个文件。
+结果表和原始客户表格会同步写入以下结果列：`row_number`、`status`、`status_label`、`admin_action`、`admin_result`、`invoice_action`、`invoice_result`、`failed_step`、`failure_reason`、`error`、`retryable`、`updated_at`、`run_id`。程序不会另存原表备份；写入时只使用同目录临时文件完成替换，避免中途写入半个文件。
 
 如果操作人员中途停止或浏览器异常，已完成客户的结果仍保留在上述目录和原表中；未出现结果的客户不会被伪造为成功。
 
-常见状态：
+结果状态：
 
-- `completed`：客户流程完成。
-- `admin_exists_skip`：目标管理员已经存在，跳过添加。
-- `admin_added`：目标管理员已添加并确认。
-- `already_correct`：Invoice email 已经正确。
-- `updated`：Invoice email 已修改并确认。
-- `failed`：该客户在某个步骤失败，需要查看 `error` 列。
+- `completed / 已完成`：客户流程完成。
+- `pending / 未处理`：尚未轮到该记录，或运行在此处中断。
+- `manual_required / 待人工处理`：缺少必要输入、入口无法匹配或需要人工确认。
+- `failed / 失败`：该客户在某个步骤失败，需要查看 `failed_step` 和 `failure_reason`。
+
+管理员动作和发票邮箱动作会分别写入代码列与中文说明列：
+
+- `already_exists / 已存在，跳过添加`：目标管理员已经存在，不会重复添加。
+- `added / 已添加并确认`：Add User 后已在 Users 列表回读到目标管理员。
+- `already_correct / 原值正确，无需修改`：Invoice email 已经是目标地址。
+- `updated / 已修改并确认`：Invoice email 修改后已回读确认。
 
 ## 常见问题
 
