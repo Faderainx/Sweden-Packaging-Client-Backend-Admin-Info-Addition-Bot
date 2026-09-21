@@ -3,9 +3,10 @@ import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from main import Customer, _parse_mail_timestamp, extract_invoice_email, extract_verification_code, load_config, resolve_mail_route
+from main import Audit, Customer, _parse_mail_timestamp, extract_invoice_email, extract_verification_code, load_config, resolve_mail_route
 
 
 class CoreTests(unittest.TestCase):
@@ -52,6 +53,54 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(_parse_mail_timestamp("NPA kundportal\n2026-09-16 23:05\n账户验证码", reference), datetime(2026, 9, 16, 23, 5))
         self.assertEqual(_parse_mail_timestamp("NPA kundportal\n9月17日 17:19\n账户验证码", reference), datetime(2026, 9, 17, 17, 19))
         self.assertEqual(_parse_mail_timestamp("时间：2026年9月18日 09:36 (星期五)", reference), datetime(2026, 9, 18, 9, 36))
+
+    def test_audit_writes_explicit_results_and_failure_reasons(self):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl is required for workbook output tests")
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_path = root / "customers.csv"
+            input_path.write_text(
+                "customer_name,portal_email,portal_password,mail_email,mail_password\n"
+                "Already exists,client1@example.test,,client1@example.test,secret\n"
+                "Read code failed,client2@example.test,,client2@example.test,secret\n",
+                encoding="utf-8",
+            )
+            audit = Audit(root / "run", input_path, total=2)
+            first = Customer.from_row(2, {"customer_name": "Already exists", "portal_email": "client1@example.test"})
+            second = Customer.from_row(3, {"customer_name": "Read code failed", "portal_email": "client2@example.test"})
+            audit.result(first, status="completed", admin_action="already_exists", invoice_action="already_correct")
+            audit.result(second, status="failed", failed_step="读取验证码", error="未找到登录后收到的有效验证码邮件")
+
+            result_book = load_workbook(audit.results_xlsx_path, read_only=True, data_only=True)
+            try:
+                sheet = result_book.active
+                headers = [cell.value for cell in sheet[1]]
+                rows = [dict(zip(headers, row)) for row in sheet.iter_rows(min_row=2, values_only=True)]
+            finally:
+                result_book.close()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["status"], "completed")
+            self.assertEqual(rows[0]["status_label"], "已完成")
+            self.assertEqual(rows[0]["admin_result"], "已存在，跳过添加")
+            self.assertEqual(rows[1]["status"], "failed")
+            self.assertEqual(rows[1]["failed_step"], "读取验证码")
+            self.assertEqual(rows[1]["failure_reason"], "未找到登录后收到的有效验证码邮件")
+            self.assertEqual(rows[1]["retryable"], "是")
+
+            failed_book = load_workbook(audit.failed_xlsx_path, read_only=True, data_only=True)
+            try:
+                failed_sheet = failed_book.active
+                failed_headers = [cell.value for cell in failed_sheet[1]]
+                failed_rows = [dict(zip(failed_headers, row)) for row in failed_sheet.iter_rows(min_row=2, values_only=True)]
+            finally:
+                failed_book.close()
+            self.assertEqual(len(failed_rows), 1)
+            self.assertEqual(failed_rows[0]["status"], "failed")
+            self.assertNotIn("Already exists", str(failed_rows[0].values()))
 
 
 if __name__ == "__main__":
