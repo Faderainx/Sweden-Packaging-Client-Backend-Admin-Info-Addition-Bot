@@ -688,14 +688,38 @@ class Audit:
     """
 
     RESULT_FIELDS = [
+        "row_number",
         "status",
+        "status_label",
         "admin_action",
+        "admin_result",
         "invoice_action",
+        "invoice_result",
         "failed_step",
+        "failure_reason",
         "error",
+        "retryable",
         "updated_at",
         "run_id",
     ]
+    STATUS_LABELS = {
+        "pending": "未处理",
+        "completed": "已完成",
+        "failed": "失败",
+        "manual_required": "待人工处理",
+        "skipped": "已跳过",
+    }
+    ADMIN_ACTION_LABELS = {
+        "added": "已添加并确认",
+        "already_exists": "已存在，跳过添加",
+        "": "未完成",
+    }
+    INVOICE_ACTION_LABELS = {
+        "updated": "已修改并确认",
+        "already_correct": "原值正确，无需修改",
+        "manual_required": "待人工确认",
+        "": "未完成",
+    }
     EVENT_LABELS = {
         "run_started": "任务开始",
         "run_finished": "任务结束",
@@ -793,7 +817,9 @@ class Audit:
     def _write_summary(self) -> None:
         completed = sum(row.get("status") == "completed" for row in self.results)
         failed = sum(row.get("status") == "failed" for row in self.results)
-        skipped = sum(row.get("status") == "manual_required" for row in self.results)
+        manual_required = sum(row.get("status") == "manual_required" for row in self.results)
+        skipped = sum(row.get("status") == "skipped" for row in self.results)
+        pending = max(self.total - len(self.results), 0)
         summary = {
             "run_id": self.run_id,
             "status": self.status,
@@ -803,7 +829,9 @@ class Audit:
             "processed": len(self.results),
             "completed": completed,
             "failed": failed,
+            "manual_required": manual_required,
             "skipped": skipped,
+            "pending": pending,
             "current_index": self.current_index,
             "current_customer": self.current_customer,
             "last_event": self.last_event,
@@ -850,10 +878,32 @@ class Audit:
         source.update(result)
         return source
 
+    def _pending_result(self, row_number: int) -> dict[str, Any]:
+        """Return an explicit placeholder so results.xlsx never looks blank."""
+        source = self.source_rows.get(row_number, {})
+        return {
+            "row_number": row_number,
+            "customer_name": source.get("customer_name") or source.get("客户名称") or "",
+            "portal_email": normalize_email(str(source.get("portal_email") or source.get("邮箱") or "")),
+            "status": "pending",
+            "status_label": self.STATUS_LABELS["pending"],
+            "admin_action": "",
+            "admin_result": self.ADMIN_ACTION_LABELS[""],
+            "invoice_action": "",
+            "invoice_result": self.INVOICE_ACTION_LABELS[""],
+            "failed_step": "",
+            "failure_reason": "",
+            "error": "",
+            "retryable": "",
+            "updated_at": "",
+            "run_id": self.run_id,
+        }
+
     def _write_one_xlsx(self, path: Path, rows: list[dict[str, Any]]) -> None:
         try:
             from openpyxl import Workbook
             from openpyxl.utils import get_column_letter
+            from openpyxl.styles import Alignment, Font, PatternFill
         except ImportError as exc:
             raise RuntimeError("写入 XLSX 需要 openpyxl，请先运行启动脚本安装依赖。") from exc
         headers = list(self.source_headers)
@@ -864,13 +914,37 @@ class Audit:
         sheet = workbook.active
         sheet.title = "results"
         sheet.append(headers)
+        header_fill = PatternFill("solid", fgColor="D9EAD3")
+        header_font = Font(bold=True)
+        for cell in sheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         for row in rows:
-            sheet.append([row.get(header, "") if row.get(header, "") is not None else "" for header in headers])
+            values = [row.get(header, "") if row.get(header, "") is not None else "" for header in headers]
+            sheet.append(values)
+            for cell in sheet[sheet.max_row]:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+            status = str(row.get("status", ""))
+            if status == "failed":
+                status_fill = PatternFill("solid", fgColor="F4CCCC")
+            elif status == "manual_required":
+                status_fill = PatternFill("solid", fgColor="FCE5CD")
+            elif status == "completed":
+                status_fill = PatternFill("solid", fgColor="D9EAD3")
+            elif status == "pending":
+                status_fill = PatternFill("solid", fgColor="EDEDED")
+            else:
+                status_fill = None
+            if status_fill:
+                status_index = headers.index("status_label") + 1 if "status_label" in headers else headers.index("status") + 1
+                sheet.cell(sheet.max_row, status_index).fill = status_fill
         sheet.freeze_panes = "A2"
         if rows:
             sheet.auto_filter.ref = sheet.dimensions
+        wide_fields = {"status_label", "admin_result", "invoice_result", "failed_step", "failure_reason", "error"}
         for index, header in enumerate(headers, 1):
-            width = min(max(len(str(header)) + 2, 12), 28)
+            width = 34 if header in wide_fields else min(max(len(str(header)) + 2, 12), 28)
             sheet.column_dimensions[get_column_letter(index)].width = width
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         try:
@@ -884,8 +958,13 @@ class Audit:
                 pass
 
     def _write_result_workbooks(self) -> None:
-        ordered = [self._combined_row(row_number, result) for row_number, result in sorted(self._result_by_row.items())]
-        failed = [row for row in ordered if row.get("status") != "completed"]
+        # Keep every source row in results.xlsx. Unprocessed rows are explicit
+        # ``pending`` records instead of looking like a copied input sheet.
+        ordered = []
+        for row_number in sorted(self.source_rows):
+            result = self._result_by_row.get(row_number) or self._pending_result(row_number)
+            ordered.append(self._combined_row(row_number, result))
+        failed = [row for row in ordered if row.get("status") in {"failed", "manual_required"}]
         self._write_one_xlsx(self.results_xlsx_path, ordered)
         self._write_one_xlsx(self.failed_xlsx_path, failed)
 
@@ -927,15 +1006,28 @@ class Audit:
 
     def result(self, customer: Customer, **values: Any) -> None:
         now = datetime.now().isoformat(timespec="seconds")
+        status = str(values.get("status") or "failed")
+        admin_action = str(values.get("admin_action") or "")
+        invoice_action = str(values.get("invoice_action") or "")
+        failed_step = str(values.get("failed_step") or "")
+        error = str(values.get("error") or values.get("failure_reason") or "")
+        retryable_value = values.get("retryable")
+        if retryable_value is None:
+            retryable_value = "是" if status in {"failed", "manual_required"} and failed_step not in {"输入校验", "邮箱入口匹配"} else "否"
         row = {
             "row_number": customer.row_number,
             "customer_name": customer.name,
             "portal_email": normalize_email(customer.portal_email),
-            "status": values.get("status", "failed"),
-            "admin_action": values.get("admin_action", ""),
-            "invoice_action": values.get("invoice_action", ""),
-            "failed_step": values.get("failed_step", ""),
-            "error": values.get("error", ""),
+            "status": status,
+            "status_label": self.STATUS_LABELS.get(status, status),
+            "admin_action": admin_action,
+            "admin_result": self.ADMIN_ACTION_LABELS.get(admin_action, admin_action or "未完成"),
+            "invoice_action": invoice_action,
+            "invoice_result": self.INVOICE_ACTION_LABELS.get(invoice_action, invoice_action or "未完成"),
+            "failed_step": failed_step,
+            "failure_reason": error,
+            "error": error,
+            "retryable": str(retryable_value),
             "updated_at": now,
             "run_id": self.run_id,
         }
@@ -954,8 +1046,9 @@ class Audit:
         self._write_operator_line(customer, "本条已记录", f"状态={status}")
         completed = sum(item.get("status") == "completed" for item in self.results)
         failed = sum(item.get("status") == "failed" for item in self.results)
-        skipped = sum(item.get("status") == "manual_required" for item in self.results)
-        progress = f"进度：{len(self.results)}/{self.total} | 成功 {completed} | 失败 {failed} | 跳过 {skipped}"
+        manual_required = sum(item.get("status") == "manual_required" for item in self.results)
+        skipped = sum(item.get("status") == "skipped" for item in self.results)
+        progress = f"进度：{len(self.results)}/{self.total} | 成功 {completed} | 失败 {failed} | 待人工 {manual_required} | 跳过 {skipped}"
         self._write_operator_line(None, progress)
         print(f"[PROGRESS] {progress}", flush=True)
         self._write_summary()
@@ -1529,6 +1622,8 @@ class NpaBot:
         portal_page = browser_context.new_page()
         mailbox_page = browser_context.new_page()
         self.current_step = "登录 NPA"
+        admin_action = ""
+        invoice_action = ""
         try:
             self.login_npa(portal_page, mailbox_page, customer, route)
             self.current_step = "打开 Settings"
@@ -1550,8 +1645,8 @@ class NpaBot:
             self.audit.event(customer, "customer_failed", f"{failed_step}：{exc}", "error")
             return {
                 "status": "failed",
-                "admin_action": "",
-                "invoice_action": "",
+                "admin_action": admin_action,
+                "invoice_action": invoice_action,
                 "failed_step": failed_step,
                 "error": str(exc),
             }
@@ -1560,8 +1655,8 @@ class NpaBot:
             self.audit.event(customer, "customer_failed", f"{failed_step}：{exc}", "error")
             return {
                 "status": "failed",
-                "admin_action": "",
-                "invoice_action": "",
+                "admin_action": admin_action,
+                "invoice_action": invoice_action,
                 "failed_step": failed_step,
                 "error": f"{type(exc).__name__}: {exc}",
             }
