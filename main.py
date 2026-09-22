@@ -792,16 +792,25 @@ class Audit:
                 workbook.close()
             if not rows:
                 return [], {}
-            headers = [str(value or "").strip() for value in rows[0]]
+            raw_headers = [str(value or "").strip() for value in rows[0]]
+            # WPS/Excel often keeps formatted but unnamed columns after the
+            # real input fields. Do not carry those empty headers into output
+            # workbooks, otherwise status and failure columns can end up far
+            # to the right (for example at column Z).
+            header_positions = [(index, header) for index, header in enumerate(raw_headers) if header]
+            headers = [header for _, header in header_positions]
             values = {
-                index + 2: {header: row[index] if index < len(row) else "" for index, header in enumerate(headers) if header}
+                index + 2: {
+                    header: row[column] if column < len(row) else ""
+                    for column, header in header_positions
+                }
                 for index, row in enumerate(rows[1:])
                 if any(row)
             }
             return headers, values
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
-            headers = list(reader.fieldnames or [])
+            headers = [str(header or "").strip() for header in (reader.fieldnames or []) if str(header or "").strip()]
             values = {index + 2: dict(row) for index, row in enumerate(reader) if any(row.values())}
         return headers, values
 
@@ -910,7 +919,13 @@ class Audit:
             from openpyxl.styles import Alignment, Font, PatternFill
         except ImportError as exc:
             raise RuntimeError("写入 XLSX 需要 openpyxl，请先运行启动脚本安装依赖。") from exc
-        headers = list(self.source_headers)
+        headers = []
+        seen_headers: set[str] = set()
+        for raw_header in self.source_headers:
+            header = str(raw_header or "").strip()
+            if header and header not in seen_headers:
+                headers.append(header)
+                seen_headers.add(header)
         for field in self.RESULT_FIELDS:
             if field not in headers:
                 headers.append(field)
