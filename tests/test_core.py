@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from main import Audit, Customer, _parse_mail_timestamp, extract_invoice_email, extract_verification_code, load_config, resolve_mail_route
+from main import Audit, Customer, _parse_mail_timestamp, extract_invoice_email, extract_verification_code, load_config, process_customer_with_retries, resolve_mail_route
 
 
 class CoreTests(unittest.TestCase):
@@ -101,6 +101,93 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(failed_rows), 1)
             self.assertEqual(failed_rows[0]["status"], "failed")
             self.assertNotIn("Already exists", str(failed_rows[0].values()))
+
+    def test_customer_retry_succeeds_before_failed_output(self):
+        class FakeContext:
+            def close(self):
+                pass
+
+        class FakeBrowser:
+            def new_context(self):
+                return FakeContext()
+
+        class FakeBot:
+            current_step = "读取验证码"
+
+            def __init__(self):
+                self.calls = 0
+
+            def process(self, customer, context, route):
+                self.calls += 1
+                if self.calls < 3:
+                    return {
+                        "status": "failed",
+                        "failed_step": "读取验证码",
+                        "error": f"第 {self.calls} 次没有找到新邮件",
+                    }
+                return {
+                    "status": "completed",
+                    "admin_action": "already_exists",
+                    "invoice_action": "already_correct",
+                }
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_path = root / "customers.csv"
+            input_path.write_text("customer_name,portal_email\nRetry customer,client@example.test\n", encoding="utf-8")
+            audit = Audit(root / "run", input_path, total=1)
+            customer = Customer.from_row(2, {"customer_name": "Retry customer", "portal_email": "client@example.test"})
+            bot = FakeBot()
+            result = process_customer_with_retries(bot, customer, FakeBrowser(), {}, audit)
+            self.assertEqual(bot.calls, 3)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["attempts"], 3)
+            audit.result(customer, **result)
+            self.assertFalse(audit.failed_xlsx_path.stat().st_size == 0)
+
+    def test_customer_retry_writes_failure_only_after_three_attempts(self):
+        class FakeContext:
+            def close(self):
+                pass
+
+        class FakeBrowser:
+            def new_context(self):
+                return FakeContext()
+
+        class AlwaysFailBot:
+            current_step = "打开 Settings"
+
+            def __init__(self):
+                self.calls = 0
+
+            def process(self, customer, context, route):
+                self.calls += 1
+                return {
+                    "status": "failed",
+                    "failed_step": "打开 Settings",
+                    "error": "页面未找到 Settings",
+                }
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_path = root / "customers.csv"
+            input_path.write_text("customer_name,portal_email\nFailed customer,client@example.test\n", encoding="utf-8")
+            audit = Audit(root / "run", input_path, total=1)
+            customer = Customer.from_row(2, {"customer_name": "Failed customer", "portal_email": "client@example.test"})
+            bot = AlwaysFailBot()
+            result = process_customer_with_retries(bot, customer, FakeBrowser(), {}, audit)
+            self.assertEqual(bot.calls, 3)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["attempts"], 3)
+            self.assertIn("连续尝试 3 次", result["error"])
+            audit.result(customer, **result)
+            from openpyxl import load_workbook
+            failed_book = load_workbook(audit.failed_xlsx_path, read_only=True, data_only=True)
+            try:
+                rows = list(failed_book.active.iter_rows(min_row=2, values_only=True))
+            finally:
+                failed_book.close()
+            self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":
