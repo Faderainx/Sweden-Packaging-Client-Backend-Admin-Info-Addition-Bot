@@ -29,6 +29,8 @@
 
 已存在的管理员不会重复添加，已经正确的 Invoice email 不会重复修改。
 
+对于页面加载、邮箱状态或验证码提交等运行时故障，单个客户最多执行 3 次完整流程（首次尝试加 2 次重试）。每次重试都会重新创建浏览器上下文，避免上一次的页面状态影响下一次。第 1 或第 2 次成功时不会进入失败表；连续 3 次仍失败时，才会写入 `failed.xlsx`，并在 `failure_reason` 中保留每次失败的步骤和原因。输入缺失、邮箱入口无法匹配等确定性问题不会重复重试。
+
 ## 客户表格
 
 GUI 支持 `.xlsx` 和 `.csv`。推荐使用以下字段：
@@ -61,11 +63,11 @@ GUI 支持 `.xlsx` 和 `.csv`。推荐使用以下字段：
 
 - `logs\operator.log`：面向操作人员的简洁进度日志，包含当前客户、当前步骤和成功/失败/跳过统计。
 - `logs\events.jsonl`：详细事件日志，不记录密码和验证码。
-- `results\results.xlsx`：本批全部输入记录，未处理的行会明确标为 `pending/未处理`；每完成一条就立即写入状态、管理员动作、Invoice email 动作、失败步骤、失败原因和更新时间。
-- `failed\failed.xlsx`：只包含 `failed` 或 `manual_required` 记录；每条都带有 `status_label`、`failed_step`、`failure_reason`、`retryable`，方便人工处理或单独重跑。管理员已存在的记录不会进入失败表。
+- `results\results.xlsx`：本批全部输入记录，未处理的行会明确标为 `pending/未处理`；每完成一条就立即写入状态、尝试次数、管理员动作、Invoice email 动作、失败步骤、失败原因和更新时间。
+- `failed\failed.xlsx`：只包含连续 3 次尝试仍失败或需要人工处理的记录；每条都带有 `status_label`、`attempts`、`failed_step`、`failure_reason`、`retryable`，方便人工处理或单独重跑。管理员已存在的记录不会进入失败表。
 - `state\run_summary.json`：本次运行的实时汇总和最后处理位置。
 
-结果表和原始客户表格会同步写入以下结果列：`row_number`、`status`、`status_label`、`admin_action`、`admin_result`、`invoice_action`、`invoice_result`、`failed_step`、`failure_reason`、`error`、`retryable`、`updated_at`、`run_id`。程序不会另存原表备份；写入时只使用同目录临时文件完成替换，避免中途写入半个文件。
+结果表和原始客户表格会同步写入以下结果列：`row_number`、`status`、`status_label`、`attempts`、`admin_action`、`admin_result`、`invoice_action`、`invoice_result`、`failed_step`、`failure_reason`、`error`、`retryable`、`updated_at`、`run_id`。程序不会另存原表备份；写入时只使用同目录临时文件完成替换，避免中途写入半个文件。
 
 如果操作人员中途停止或浏览器异常，已完成客户的结果仍保留在上述目录和原表中；未出现结果的客户不会被伪造为成功。
 
@@ -91,7 +93,7 @@ GUI 支持 `.xlsx` 和 `.csv`。推荐使用以下字段：
 
 ### 自动读取验证码失败
 
-程序会将该客户标记为失败并继续处理下一位客户。请在日志中查看是否为邮箱登录、邮件时间识别或邮件正文加载问题。
+程序会重新创建页面并最多重试 3 次；只有 3 次都失败才会将该客户写入失败表。请在 `failed.xlsx` 的 `failed_step` 和 `failure_reason` 中查看具体卡点。
 
 ### 某个客户失败，其他客户正常
 
