@@ -83,13 +83,13 @@ class CoreTests(unittest.TestCase):
             finally:
                 result_book.close()
             self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["status"], "completed")
-            self.assertEqual(rows[0]["status_label"], "已完成")
-            self.assertEqual(rows[0]["admin_result"], "已存在，跳过添加")
-            self.assertEqual(rows[1]["status"], "failed")
-            self.assertEqual(rows[1]["failed_step"], "读取验证码")
-            self.assertEqual(rows[1]["failure_reason"], "未找到登录后收到的有效验证码邮件")
-            self.assertEqual(rows[1]["retryable"], "是")
+            self.assertEqual(rows[0]["状态"], "completed")
+            self.assertEqual(rows[0]["状态说明"], "已完成")
+            self.assertEqual(rows[0]["管理员结果"], "已存在，跳过添加")
+            self.assertEqual(rows[1]["状态"], "failed")
+            self.assertEqual(rows[1]["失败步骤"], "读取验证码")
+            self.assertEqual(rows[1]["失败原因"], "读取验证码：未找到登录后收到的有效验证码邮件")
+            self.assertEqual(rows[1]["是否可重试"], "是")
 
             failed_book = load_workbook(audit.failed_xlsx_path, read_only=True, data_only=True)
             try:
@@ -99,7 +99,7 @@ class CoreTests(unittest.TestCase):
             finally:
                 failed_book.close()
             self.assertEqual(len(failed_rows), 1)
-            self.assertEqual(failed_rows[0]["status"], "failed")
+            self.assertEqual(failed_rows[0]["状态"], "failed")
             self.assertNotIn("Already exists", str(failed_rows[0].values()))
 
     def test_customer_retry_succeeds_before_failed_output(self):
@@ -212,9 +212,56 @@ class CoreTests(unittest.TestCase):
             finally:
                 result_book.close()
             self.assertEqual(headers[:7], ["下单日期", "代理名称", "客户编号", "客户中文名称", "客户英文名称", "邮箱", "邮箱密码"])
-            self.assertEqual(headers[7], "row_number")
-            self.assertEqual(headers[8], "status")
-            self.assertEqual(headers[9], "status_label")
+            self.assertEqual(headers[7], "失败原因")
+            self.assertEqual(headers[8], "状态")
+            self.assertEqual(headers[9], "状态说明")
+
+    def test_source_workbook_migrates_old_far_right_results(self):
+        try:
+            from openpyxl import Workbook, load_workbook
+        except ImportError:
+            self.skipTest("openpyxl is required for workbook output tests")
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_path = root / "customers.xlsx"
+            source_book = Workbook()
+            source_sheet = source_book.active
+            source_sheet.append([
+                "下单日期", "代理名称", "客户编号", "客户中文名称", "客户英文名称", "邮箱", "邮箱密码",
+                "", "", "", "", "",
+                "row_number", "status", "status_label", "failure_reason",
+            ])
+            source_sheet.append([
+                "2026-09-22", "测试代理", "C-001", "测试客户", "Test", "client@example.test", "secret",
+                "", "", "", "", "",
+                2, "failed", "失败", "旧失败原因",
+            ])
+            source_book.save(input_path)
+            source_book.close()
+
+            audit = Audit(root / "run", input_path, total=1)
+            customer = Customer.from_row(2, {
+                "客户中文名称": "测试客户",
+                "邮箱": "client@example.test",
+                "邮箱密码": "secret",
+            })
+            audit.result(customer, status="failed", failed_step="读取验证码", error="验证码邮件未找到")
+
+            migrated = load_workbook(input_path, read_only=True, data_only=True)
+            try:
+                sheet = migrated.active
+                headers = [sheet.cell(1, column).value for column in range(1, sheet.max_column + 1)]
+                values = [sheet.cell(2, column).value for column in range(1, sheet.max_column + 1)]
+            finally:
+                migrated.close()
+            self.assertEqual(headers[:9], [
+                "下单日期", "代理名称", "客户编号", "客户中文名称", "客户英文名称", "邮箱", "邮箱密码", "失败原因", "状态",
+            ])
+            self.assertEqual(values[7], "读取验证码：验证码邮件未找到")
+            self.assertEqual(values[8], "failed")
+            self.assertNotIn("row_number", headers)
+            self.assertNotIn("status_label", headers)
 
 
 if __name__ == "__main__":
