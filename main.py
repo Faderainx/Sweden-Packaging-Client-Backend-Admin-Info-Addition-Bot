@@ -28,6 +28,28 @@ def normalize_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
+def failure_reason_text(failed_step: str, error: str) -> str:
+    """Return a concise Chinese explanation for workbook output."""
+    step = str(failed_step or "未知步骤").strip() or "未知步骤"
+    detail = str(error or "").strip()
+    if not detail:
+        return f"{step}失败：程序未捕获到更具体的错误信息"
+    if re.search(r"[\u4e00-\u9fff]", detail):
+        return detail if step in detail else f"{step}：{detail}"
+    lowered = detail.lower()
+    if "timeout" in lowered or "timed out" in lowered:
+        translated = "页面或网络响应超时"
+    elif "not found" in lowered or "locator" in lowered:
+        translated = "页面未找到目标控件"
+    elif "target closed" in lowered or "page closed" in lowered:
+        translated = "浏览器页面意外关闭"
+    elif "net::err" in lowered or "connection" in lowered:
+        translated = "网络连接失败"
+    else:
+        translated = "自动化执行异常"
+    return f"{step}：{translated}（{detail}）"
+
+
 def _row_value(row: dict[str, Any], *names: str) -> str:
     normalized = {str(k).strip().lower(): str(v or "").strip() for k, v in row.items()}
     for name in names:
@@ -688,8 +710,11 @@ class Audit:
     进程结束时才执行一次的批量写盘。
     """
 
+    # The internal keys remain stable for code and JSON logs. Workbook
+    # columns use Chinese labels and are placed immediately after the real
+    # customer input columns, with failure reason first for quick review.
     RESULT_FIELDS = [
-        "row_number",
+        "failure_reason",
         "status",
         "status_label",
         "attempts",
@@ -698,12 +723,33 @@ class Audit:
         "invoice_action",
         "invoice_result",
         "failed_step",
-        "failure_reason",
         "error",
         "retryable",
         "updated_at",
         "run_id",
+        "row_number",
     ]
+    RESULT_DISPLAY_HEADERS = {
+        "failure_reason": "失败原因",
+        "status": "状态",
+        "status_label": "状态说明",
+        "attempts": "尝试次数",
+        "admin_action": "管理员操作",
+        "admin_result": "管理员结果",
+        "invoice_action": "发票邮箱操作",
+        "invoice_result": "发票邮箱结果",
+        "failed_step": "失败步骤",
+        "error": "错误详情",
+        "retryable": "是否可重试",
+        "updated_at": "更新时间",
+        "run_id": "运行编号",
+        "row_number": "原始行号",
+    }
+    DISPLAY_TO_RESULT_FIELD = {label: field for field, label in RESULT_DISPLAY_HEADERS.items()}
+    RESULT_HEADER_ALIASES = {
+        field: {field, label}
+        for field, label in RESULT_DISPLAY_HEADERS.items()
+    }
     STATUS_LABELS = {
         "pending": "未处理",
         "completed": "已完成",
@@ -797,7 +843,12 @@ class Audit:
             # real input fields. Do not carry those empty headers into output
             # workbooks, otherwise status and failure columns can end up far
             # to the right (for example at column Z).
-            header_positions = [(index, header) for index, header in enumerate(raw_headers) if header]
+            result_headers = set(Audit.RESULT_FIELDS) | set(Audit.RESULT_DISPLAY_HEADERS.values())
+            header_positions = [
+                (index, header)
+                for index, header in enumerate(raw_headers)
+                if header and header not in result_headers
+            ]
             headers = [header for _, header in header_positions]
             values = {
                 index + 2: {
@@ -810,7 +861,12 @@ class Audit:
             return headers, values
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
-            headers = [str(header or "").strip() for header in (reader.fieldnames or []) if str(header or "").strip()]
+            result_headers = set(Audit.RESULT_FIELDS) | set(Audit.RESULT_DISPLAY_HEADERS.values())
+            headers = [
+                str(header or "").strip()
+                for header in (reader.fieldnames or [])
+                if str(header or "").strip() and str(header or "").strip() not in result_headers
+            ]
             values = {index + 2: dict(row) for index, row in enumerate(reader) if any(row.values())}
         return headers, values
 
@@ -926,9 +982,7 @@ class Audit:
             if header and header not in seen_headers:
                 headers.append(header)
                 seen_headers.add(header)
-        for field in self.RESULT_FIELDS:
-            if field not in headers:
-                headers.append(field)
+        headers.extend(self.RESULT_DISPLAY_HEADERS[field] for field in self.RESULT_FIELDS)
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = "results"
@@ -940,7 +994,11 @@ class Audit:
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         for row in rows:
-            values = [row.get(header, "") if row.get(header, "") is not None else "" for header in headers]
+            values = []
+            for header in headers:
+                internal_field = self.DISPLAY_TO_RESULT_FIELD.get(header)
+                value = row.get(internal_field, "") if internal_field else row.get(header, "")
+                values.append(value if value is not None else "")
             sheet.append(values)
             for cell in sheet[sheet.max_row]:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
@@ -956,12 +1014,12 @@ class Audit:
             else:
                 status_fill = None
             if status_fill:
-                status_index = headers.index("status_label") + 1 if "status_label" in headers else headers.index("status") + 1
+                status_index = headers.index("状态说明") + 1
                 sheet.cell(sheet.max_row, status_index).fill = status_fill
         sheet.freeze_panes = "A2"
         if rows:
             sheet.auto_filter.ref = sheet.dimensions
-        wide_fields = {"status_label", "admin_result", "invoice_result", "failed_step", "failure_reason", "error"}
+        wide_fields = {"失败原因", "状态说明", "管理员结果", "发票邮箱结果", "失败步骤", "错误详情"}
         for index, header in enumerate(headers, 1):
             width = 34 if header in wide_fields else min(max(len(str(header)) + 2, 12), 28)
             sheet.column_dimensions[get_column_letter(index)].width = width
@@ -996,14 +1054,55 @@ class Audit:
         try:
             sheet = workbook.active
             headers = [str(sheet.cell(1, column).value or "").strip() for column in range(1, sheet.max_column + 1)]
+            result_aliases = set(self.RESULT_FIELDS) | set(self.RESULT_DISPLAY_HEADERS.values())
+            source_columns = {
+                column
+                for column, header in enumerate(headers, 1)
+                if header and header not in result_aliases
+            }
+            last_source_column = max(source_columns, default=0)
+            existing_result_columns: dict[str, list[int]] = {field: [] for field in self.RESULT_FIELDS}
+            for column, header in enumerate(headers, 1):
+                if header in self.RESULT_FIELDS:
+                    existing_result_columns[header].append(column)
+                else:
+                    field = self.DISPLAY_TO_RESULT_FIELD.get(header)
+                    if field:
+                        existing_result_columns[field].append(column)
+
+            # Put result columns immediately after the last real input column
+            # (normally the email password column). If an older run placed
+            # English result columns far to the right, move their values into
+            # this compact block and clear the old columns.
+            old_values: dict[str, list[Any]] = {}
+            old_result_columns: set[int] = set()
+            for field, columns_for_field in existing_result_columns.items():
+                if columns_for_field:
+                    old_column = columns_for_field[0]
+                    old_result_columns.update(columns_for_field)
+                    old_values[field] = [sheet.cell(row, old_column).value for row in range(2, sheet.max_row + 1)]
+
+            columns: dict[str, int] = {}
+            target_column = last_source_column + 1
             for field in self.RESULT_FIELDS:
-                if field not in headers:
-                    headers.append(field)
-                    sheet.cell(1, len(headers), field)
-            columns = {header: index + 1 for index, header in enumerate(headers) if header}
+                columns[field] = target_column
+                sheet.cell(1, target_column, self.RESULT_DISPLAY_HEADERS[field])
+                target_column += 1
+
+            target_columns = set(columns.values())
+            for old_column in old_result_columns - target_columns:
+                for row in range(1, sheet.max_row + 1):
+                    sheet.cell(row, old_column).value = None
+
             for row_number, result in self._result_by_row.items():
                 for field in self.RESULT_FIELDS:
                     sheet.cell(row_number, columns[field], result.get(field, ""))
+            # Preserve old results for source rows not processed in this run.
+            for field, values in old_values.items():
+                for offset, value in enumerate(values, 2):
+                    row_number = offset
+                    if row_number not in self._result_by_row and sheet.cell(row_number, columns[field]).value in (None, ""):
+                        sheet.cell(row_number, columns[field], value)
             temporary = self.input_path.with_name(f".{self.input_path.stem}.robot_tmp_{os.getpid()}.xlsx")
             try:
                 workbook.save(temporary)
@@ -1034,6 +1133,9 @@ class Audit:
         invoice_action = str(values.get("invoice_action") or "")
         failed_step = str(values.get("failed_step") or "")
         error = str(values.get("error") or values.get("failure_reason") or "")
+        failure_reason = str(values.get("failure_reason") or "")
+        if status in {"failed", "manual_required"}:
+            failure_reason = failure_reason or failure_reason_text(failed_step, error)
         retryable_value = values.get("retryable")
         if retryable_value is None:
             retryable_value = "是" if status in {"failed", "manual_required"} and failed_step not in {"输入校验", "邮箱入口匹配"} else "否"
@@ -1049,7 +1151,7 @@ class Audit:
             "invoice_action": invoice_action,
             "invoice_result": self.INVOICE_ACTION_LABELS.get(invoice_action, invoice_action or "未完成"),
             "failed_step": failed_step,
-            "failure_reason": error,
+            "failure_reason": failure_reason,
             "error": error,
             "retryable": str(retryable_value),
             "updated_at": now,
