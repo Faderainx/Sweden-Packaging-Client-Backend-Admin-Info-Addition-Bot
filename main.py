@@ -21,6 +21,7 @@ TARGET_ADMIN_EMAIL = "admin@example.com"
 TARGET_INVOICE_EMAIL = "invoice@example.com"
 MAIL_TIMESTAMP_TOLERANCE = timedelta(minutes=2)
 DEFAULT_CODE_WAIT_SECONDS = 90
+MAX_CUSTOMER_ATTEMPTS = 3
 
 
 def normalize_email(value: str | None) -> str:
@@ -691,6 +692,7 @@ class Audit:
         "row_number",
         "status",
         "status_label",
+        "attempts",
         "admin_action",
         "admin_result",
         "invoice_action",
@@ -741,6 +743,7 @@ class Audit:
         "invoice_email_read": "已读取发票邮箱",
         "invoice_email_updated": "发票邮箱已更新",
         "customer_failed": "处理失败",
+        "customer_retry": "客户流程重试",
         "customer_skipped": "已跳过",
         "result_output_write_failed": "结果表写入失败",
         "source_workbook_update_failed": "原表回写失败",
@@ -887,6 +890,7 @@ class Audit:
             "portal_email": normalize_email(str(source.get("portal_email") or source.get("邮箱") or "")),
             "status": "pending",
             "status_label": self.STATUS_LABELS["pending"],
+            "attempts": 0,
             "admin_action": "",
             "admin_result": self.ADMIN_ACTION_LABELS[""],
             "invoice_action": "",
@@ -1007,6 +1011,10 @@ class Audit:
     def result(self, customer: Customer, **values: Any) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         status = str(values.get("status") or "failed")
+        try:
+            attempts = int(values.get("attempts") or 1)
+        except (TypeError, ValueError):
+            attempts = 1
         admin_action = str(values.get("admin_action") or "")
         invoice_action = str(values.get("invoice_action") or "")
         failed_step = str(values.get("failed_step") or "")
@@ -1020,6 +1028,7 @@ class Audit:
             "portal_email": normalize_email(customer.portal_email),
             "status": status,
             "status_label": self.STATUS_LABELS.get(status, status),
+            "attempts": attempts,
             "admin_action": admin_action,
             "admin_result": self.ADMIN_ACTION_LABELS.get(admin_action, admin_action or "未完成"),
             "invoice_action": invoice_action,
@@ -1665,6 +1674,88 @@ class NpaBot:
             mailbox_page.close()
 
 
+def process_customer_with_retries(
+    bot: NpaBot,
+    customer: Customer,
+    browser: Any,
+    route: dict[str, Any],
+    audit: Audit,
+    *,
+    max_attempts: int = MAX_CUSTOMER_ATTEMPTS,
+) -> dict[str, Any]:
+    """Run one customer in isolated contexts until success or final failure.
+
+    A failed attempt is deliberately not written to ``failed.xlsx``. The
+    result is only handed to Audit.result after all attempts are exhausted,
+    so a transient page or mailbox failure cannot leave a false failure row.
+    The existing portal checks are idempotent: an Add User that succeeded
+    before a later failure is seen as already existing on the next attempt.
+    """
+    attempts_limit = max(1, int(max_attempts))
+    last_result: dict[str, Any] = {
+        "status": "failed",
+        "admin_action": "",
+        "invoice_action": "",
+        "failed_step": "未知步骤",
+        "error": "未开始处理",
+        "attempts": 0,
+    }
+    history: list[str] = []
+
+    for attempt in range(1, attempts_limit + 1):
+        context = None
+        try:
+            context = browser.new_context()
+            current = dict(bot.process(customer, context, route))
+        except Exception as exc:
+            current = {
+                "status": "failed",
+                "admin_action": "",
+                "invoice_action": "",
+                "failed_step": getattr(bot, "current_step", "创建浏览器上下文") or "创建浏览器上下文",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+
+        # Preserve any action that was confirmed by an earlier attempt. This
+        # matters when Add User succeeds, then a later Invoice email check
+        # fails and the next attempt fails before reaching Settings.
+        for field in ("admin_action", "invoice_action"):
+            if not current.get(field) and last_result.get(field):
+                current[field] = last_result[field]
+        current["attempts"] = attempt
+        last_result = current
+
+        status = str(current.get("status") or "failed")
+        if status == "completed":
+            return current
+        if status not in {"failed", "manual_required"}:
+            return current
+
+        failed_step = str(current.get("failed_step") or "未知步骤")
+        error = str(current.get("error") or "未提供具体原因")
+        history.append(f"第{attempt}次：{failed_step}：{error}")
+        if attempt < attempts_limit:
+            audit.event(
+                customer,
+                "customer_retry",
+                f"第 {attempt}/{attempts_limit} 次失败（{failed_step}：{error}），准备第 {attempt + 1} 次",
+                "warning",
+            )
+
+    # Only the final aggregate is sent to Audit.result. Therefore failed.xlsx
+    # receives a row only after all three attempts have failed.
+    last_result["attempts"] = attempts_limit
+    last_result["error"] = f"连续尝试 {attempts_limit} 次仍未完成；" + "；".join(history)
+    last_result["retryable"] = "否"
+    return last_result
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="瑞典 NPA 管理员与 Invoice email 自动化工具")
     parser.add_argument("--input", type=Path, default=Path("data/customers.csv"), help="客户 CSV/XLSX 表格")
@@ -1744,12 +1835,21 @@ def main() -> int:
                 continue
             if route.get("ambiguous_alias"):
                 audit.event(customer, "mail_route_alias_match", str(route.get("matched_by")), "warning")
-            context = browser.new_context()
             try:
-                result = bot.process(customer, context, route)
+                result = process_customer_with_retries(bot, customer, browser, route, audit)
                 audit.result(customer, **result)
-            finally:
-                context.close()
+            except Exception as exc:
+                # The retry wrapper is defensive, but keep a final result row
+                # if an unexpected outer error escapes it.
+                audit.event(customer, "customer_failed", f"重试流程异常：{type(exc).__name__}: {exc}", "error")
+                audit.result(
+                    customer,
+                    status="failed",
+                    failed_step="重试流程",
+                    error=f"{type(exc).__name__}: {exc}",
+                    attempts=MAX_CUSTOMER_ATTEMPTS,
+                    retryable="否",
+                )
         browser.close()
     audit.status = "completed"
     audit.event(None, "run_finished", f"结果数={len(audit.results)}")
