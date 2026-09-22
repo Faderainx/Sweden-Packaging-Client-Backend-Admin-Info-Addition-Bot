@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 
 BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-BUILD_VERSION = "2026.09.20"
+BUILD_VERSION = "2026.09.22"
 DEFAULT_XLSX = BASE_DIR / "data" / "customers.xlsx"
 DEFAULT_CSV = BASE_DIR / "data" / "customers.csv"
 GUI_STATE_FILE = BASE_DIR / "gui_state.json"
@@ -212,7 +212,7 @@ class RobotGui(tk.Tk):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
-        self._append_log("已启动任务。程序将自动读取并提交验证码。\n")
+        self._append_log(f"版本：v{BUILD_VERSION}\n启动目录：{BASE_DIR}\n已启动任务。程序将自动读取并提交验证码。\n")
         self.status_var.set("运行中")
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
