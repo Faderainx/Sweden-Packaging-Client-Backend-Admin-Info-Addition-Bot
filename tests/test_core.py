@@ -189,6 +189,33 @@ class CoreTests(unittest.TestCase):
                 failed_book.close()
             self.assertEqual(len(rows), 1)
 
+    def test_xlsx_output_compacts_unnamed_columns(self):
+        try:
+            from openpyxl import Workbook, load_workbook
+        except ImportError:
+            self.skipTest("openpyxl is required for workbook output tests")
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_path = root / "customers.xlsx"
+            source_book = Workbook()
+            source_sheet = source_book.active
+            source_sheet.append(["下单日期", "代理名称", "客户编号", "客户中文名称", "客户英文名称", "邮箱", "邮箱密码", "", "", ""])
+            source_sheet.append(["2026-09-22", "测试代理", "C-001", "测试客户", "Test", "client@example.test", "secret", "", "", ""])
+            source_book.save(input_path)
+            source_book.close()
+
+            audit = Audit(root / "run", input_path, total=1)
+            result_book = load_workbook(audit.results_xlsx_path, read_only=True, data_only=True)
+            try:
+                headers = [cell.value for cell in result_book.active[1]]
+            finally:
+                result_book.close()
+            self.assertEqual(headers[:7], ["下单日期", "代理名称", "客户编号", "客户中文名称", "客户英文名称", "邮箱", "邮箱密码"])
+            self.assertEqual(headers[7], "row_number")
+            self.assertEqual(headers[8], "status")
+            self.assertEqual(headers[9], "status_label")
+
 
 if __name__ == "__main__":
     unittest.main()
